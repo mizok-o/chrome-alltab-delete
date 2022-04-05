@@ -1,0 +1,18 @@
+{
+  "name": "Sample",
+  "version": "1.0",
+  "manifest_version": 3,
+  // "description": "Sample Chrome Extension",
+  "action": {
+    "default_icon": {
+      "16": "./Group 15.png"
+    }
+    // "default_title": "delete tabs"
+  },
+  "background": {
+    "service_worker": "./content.js"
+  },
+  "permissions": [
+    "tabs"
+  ]
+}
