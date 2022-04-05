@@ -8,4 +8,4 @@
 
 ![image](https://user-images.githubusercontent.com/49902457/161800870-29c7e1de-808e-4e0c-aa12-78874d27f0d3.png)
 
-「拡張機能を読み込む」で、./content以下をアップロードすればローカルPCで動く、はず！
+「拡張機能を読み込む」で、./extension-contents 以下をアップロードすればローカルPCで動く、はず！
