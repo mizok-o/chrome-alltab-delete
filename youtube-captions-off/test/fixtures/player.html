@@ -12,17 +12,29 @@
 window.mock = {
   playerTrack: null,   // プレイヤー側の字幕状態。null = オフ
   changeEvents: 0,
+  sawShowing: 0,       // 字幕トラックが一度でも showing になった回数
+  lateListener: false, // true: change の監視を loadedmetadata まで遅らせ、その時点で字幕オンを再適用する
   log: [],
   video: null,
 
   attach(video) {
     if (this.video === video) return;
     this.video = video;
-    video.textTracks.addEventListener('change', () => {
+    const listen = () => video.textTracks.addEventListener('change', () => {
       this.changeEvents++;
       let showing = null;
-      for (const t of video.textTracks) if (t.mode === 'showing') showing = t.id;
+      for (const t of video.textTracks) {
+        if (t.kind !== 'subtitles') continue;
+        if (t.mode === 'showing') { showing = t.id; this.sawShowing++; }
+      }
       this.playerTrack = showing;
+      this.renderDomCaption();
+    });
+    if (!this.lateListener) return listen();
+    video.addEventListener('loadedmetadata', () => {
+      if (!this.listening) { this.listening = true; listen(); }
+      // 字幕設定の復元などで、トラックに触れずにプレイヤーだけ字幕オンに戻す
+      this.playerTrack = this.currentId + '.ja';
       this.renderDomCaption();
     });
   },
@@ -46,6 +58,7 @@ window.mock = {
   // SPA 遷移：同じ video 要素で次の動画を読み込む
   loadVideo(videoId) {
     const v = this.video;
+    this.currentId = videoId;
     v.querySelectorAll('track').forEach((t) => t.remove());
     v.src = 'clip.webm?v=' + videoId;
     for (const lang of ['en', 'ja']) {
@@ -58,6 +71,9 @@ window.mock = {
       if (lang === 'ja') tr.setAttribute('default', '1'); // 字幕が勝手にオンになる状態
       v.appendChild(tr);
     }
+    // 字幕以外のトラック。字幕オフの対象にしてはいけない
+    const meta = v.addTextTrack('metadata', 'id3');
+    meta.mode = 'hidden';
     // プレイヤーは字幕オンのつもりで DOM の字幕も描く
     this.playerTrack = videoId + '.ja';
     this.renderDomCaption();

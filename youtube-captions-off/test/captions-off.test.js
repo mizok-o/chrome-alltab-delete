@@ -62,10 +62,16 @@ test('対照：スクリプトなしでは字幕が出る（テストが字幕�
 test('要件どおり字幕がオフのまま保たれる', async (t) => {
   const { page, net } = await open(true);
 
-  await t.test('動画を開いても字幕が出ず、プレイヤーも字幕オフになる', async () => {
+  await t.test('動画を開いても字幕が一瞬も出ず、プレイヤーも字幕オフになる', async () => {
     await page.evaluate(() => { mock.createVideo(); mock.loadVideo('v1'); });
     assert.deepEqual(await watch(page), OFF);
     assert.equal(net.vtt, 0, '字幕ファイルを読み込ませない');
+    assert.equal(await page.evaluate(() => mock.sawShowing), 0, '一時的にも showing にならない');
+  });
+
+  await t.test('字幕以外のトラックには触れない', async () => {
+    const modes = await page.evaluate(() => [...mock.video.textTracks].filter((t) => t.kind === 'metadata').map((t) => t.mode));
+    assert.ok(modes.length > 0 && modes.every((m) => m === 'hidden'));
   });
 
   await t.test('全画面の標準プレイヤー側で字幕をオンにされてもオフに戻る', async () => {
@@ -78,9 +84,11 @@ test('要件どおり字幕がオフのまま保たれる', async (t) => {
 
   await t.test('次の動画へ移っても字幕が出ない（同じ video 要素）', async () => {
     const vtt = net.vtt;
+    const saw = await page.evaluate(() => mock.sawShowing);
     await page.evaluate(() => { history.pushState({}, '', '/watch?v=v2'); mock.loadVideo('v2'); });
     assert.deepEqual(await watch(page), OFF);
     assert.equal(net.vtt - vtt, 0);
+    assert.equal(await page.evaluate(() => mock.sawShowing), saw);
   });
 
   await t.test('おすすめへ移っても字幕が出ない（video 要素の差し替え）', async () => {
@@ -107,9 +115,18 @@ test('要件どおり字幕がオフのまま保たれる', async (t) => {
   await page.close();
 });
 
+test('プレイヤーが監視を遅れて始め、後から字幕オンを再適用してもオフに揃う', async () => {
+  const { page, net } = await open(true);
+  await page.evaluate(() => { mock.lateListener = true; mock.createVideo(); mock.loadVideo('v1'); });
+  assert.deepEqual(await watch(page), OFF);
+  assert.equal(net.vtt, 0);
+  await page.close();
+});
+
 test('スクリプトの設定と構成', () => {
   assert.match(SCRIPT, /@run-at\s+document-start/, '読み込みの早い段階で動く');
   assert.doesNotMatch(SCRIPT, /\b(fetch|XMLHttpRequest|WebSocket|sendBeacon|GM_xmlhttpRequest|EventSource)\b/, '通信処理がない');
+  assert.doesNotMatch(SCRIPT, /@(updateURL|downloadURL)/, '書き換え可能な場所から自動更新しない');
   const outsideConfig = SCRIPT.replace(/const CONFIG = \{[\s\S]*?\n  \};/, '');
   assert.doesNotMatch(outsideConfig, /ytp-|caption-window|captions-text/, 'YouTube の部品名は CONFIG の1か所だけ');
 });

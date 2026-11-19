@@ -1,14 +1,12 @@
 // ==UserScript==
 // @name         YouTube Captions Off
 // @description  YouTube の字幕を常にオフにする。全画面・次の動画への遷移でもオフを維持する。
-// @version      1.1.0
+// @version      1.2.0
 // @match        *://m.youtube.com/*
 // @match        *://www.youtube.com/*
 // @run-at       document-start
 // @inject-into  content
 // @noframes
-// @updateURL    https://raw.githubusercontent.com/mizok-o/chrome-alltab-delete/main/youtube-captions-off/youtube-captions-off.user.js
-// @downloadURL  https://raw.githubusercontent.com/mizok-o/chrome-alltab-delete/main/youtube-captions-off/youtube-captions-off.user.js
 // ==/UserScript==
 
 (function () {
@@ -25,8 +23,8 @@
       '.ytp-caption-segment',          // 字幕の文字
       '.captions-text',
     ],
-    // 方式B（主）：この種類の字幕トラックを無効化する。空配列なら全トラックが対象
-    trackKinds: [],
+    // 方式B（主）：この種類の字幕トラックを無効化する。metadata などのトラックには触れない
+    trackKinds: ['subtitles', 'captions'],
     // 字幕オフをかけ直すきっかけにする video 要素のイベント
     videoEvents: [
       'loadstart',
@@ -64,7 +62,7 @@
 
   // --- 方式B：video 要素の字幕トラックを無効化する ---
   function isTarget(track) {
-    return CONFIG.trackKinds.length === 0 || CONFIG.trackKinds.includes(track.kind);
+    return CONFIG.trackKinds.includes(track.kind);
   }
 
   function disableTracks(video) {
@@ -103,10 +101,11 @@
     }, 0);
   }
 
-  // default 付きの字幕はブラウザが自動でオンにし、字幕ファイルの読み込みも始まる。追加された時点で外す
+  // default 付きの字幕はブラウザが自動でオンにし、字幕ファイルの読み込みも始まる。追加・付け直しの時点で外す
   function stripDefault(track) {
+    if (!isTarget({ kind: track.getAttribute('kind') || 'subtitles' })) return;
     if (track.hasAttribute('default')) track.removeAttribute('default');
-    if (track.track && isTarget(track.track) && track.track.mode !== 'disabled') track.track.mode = 'disabled';
+    if (track.track && track.track.mode !== 'disabled') track.track.mode = 'disabled';
     const video = track.parentElement;
     if (video && video.tagName === 'VIDEO') notifyPlayer(video);
   }
@@ -120,21 +119,29 @@
     }
   }
 
-  // SPA 遷移で video が差し替わっても拾えるよう、DOM の追加を監視する
+  // SPA 遷移で video が差し替わっても拾えるよう、DOM の追加と default の付け直しを監視する
   new MutationObserver((mutations) => {
     for (const m of mutations) {
+      if (m.type === 'attributes') {
+        if (m.target.tagName === 'TRACK') stripDefault(m.target);
+        continue;
+      }
       for (const node of m.addedNodes) {
         if (node.nodeType === 1) scan(node);
       }
     }
-  }).observe(document, { childList: true, subtree: true });
+  }).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['default'] });
 
   // video のイベントはバブリングしないため、capture で document 側から拾う
   for (const type of CONFIG.videoEvents) {
     document.addEventListener(
       type,
       (e) => {
-        if (e.target && e.target.tagName === 'VIDEO') watchVideo(e.target);
+        if (e.target && e.target.tagName === 'VIDEO') {
+          watchVideo(e.target);
+          // プレイヤーが後から字幕オンを再適用しても、オフに揃え直す
+          notifyPlayer(e.target);
+        }
       },
       true
     );
