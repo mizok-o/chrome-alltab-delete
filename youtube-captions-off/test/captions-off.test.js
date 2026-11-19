@@ -25,7 +25,18 @@ async function open(withScript) {
     const url = new URL(route.request().url());
     if (url.origin !== ORIGIN) { net.external++; return route.abort(); }
     if (url.pathname.endsWith('.vtt')) { net.vtt++; return route.fulfill({ contentType: 'text/vtt', body: VTT }); }
-    return route.fulfill({ path: path.join(FIX, path.basename(url.pathname)) });
+    const file = path.join(FIX, path.basename(url.pathname));
+    const range = route.request().headers()['range'];
+    if (range && file.endsWith('.webm') && !url.searchParams.has('noseek')) {
+      // 途中からの読み込みに応える。動画を飛ばせるようにするため
+      const buf = fs.readFileSync(file);
+      const [, a, b] = /bytes=(\d+)-(\d*)/.exec(range);
+      const start = Number(a), end = b ? Number(b) : buf.length - 1;
+      return route.fulfill({ status: 206, body: buf.subarray(start, end + 1), headers: {
+        'Content-Type': 'video/webm', 'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${start}-${end}/${buf.length}`,
+      } });
+    }
+    return route.fulfill({ path: file });
   });
   if (withScript) await page.addInitScript(SCRIPT);
   await page.goto(ORIGIN + '/player.html');
@@ -123,10 +134,87 @@ test('プレイヤーが監視を遅れて始め、後から字幕オンを再�
   await page.close();
 });
 
+// 広告を流し、ms 以内に終わったかを返す
+function runAd(page, opts, ms = 1500) {
+  return page.evaluate(async ({ opts, ms }) => {
+    mock.video.playbackRate = 1.5; // 利用者が選んだ再生速度。本編を少し再生してから広告に入る
+    await mock.video.play().catch(() => {});
+    await new Promise((r) => setTimeout(r, 300));
+    mock.playAd(opts);
+    const end = performance.now() + ms;
+    while (!mock.adEnded && performance.now() < end) await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, 50));
+    const overlay = document.querySelector('.ytp-ad-overlay-container');
+    return {
+      adEnded: mock.adEnded,
+      skipClicks: mock.skipClicks,
+      rate: mock.video.playbackRate,
+      currentTime: mock.video.currentTime,
+      overlayHidden: !overlay || getComputedStyle(overlay).display === 'none',
+    };
+  }, { opts, ms });
+}
+
+test('動画広告', async (t) => {
+  await t.test('対照：スクリプトなしでは広告が最後まで流れる', async () => {
+    const { page } = await open(false);
+    await page.evaluate(() => { mock.createVideo(); mock.loadVideo('v1'); });
+    const r = await runAd(page, {});
+    assert.equal(r.adEnded, false);
+    assert.equal(r.overlayHidden, false);
+    await page.close();
+  });
+
+  const { page } = await open(true);
+  await page.evaluate(() => { mock.createVideo(); mock.loadVideo('v1'); });
+
+  await t.test('広告を最後まで飛ばし、再生速度を元に戻す', async () => {
+    const r = await runAd(page, {});
+    assert.equal(r.adEnded, true, '広告が終わる');
+    assert.equal(r.rate, 1.5, '利用者の再生速度に戻る');
+  });
+
+  await t.test('飛ばせない広告は早送りで終わらせ、再生が止まり続けない', async () => {
+    const r = await runAd(page, { noSeek: true });
+    assert.equal(r.adEnded, true);
+    assert.equal(r.rate, 1.5);
+  });
+
+  await t.test('スキップボタンがあれば押す', async () => {
+    const r = await runAd(page, { skipButton: true });
+    assert.equal(r.adEnded, true);
+    assert.ok(r.skipClicks > 0);
+  });
+
+  await t.test('バナー広告は CSS で隠れる', async () => {
+    const r = await page.evaluate(() => {
+      mock.playAd();
+      const o = document.querySelector('.ytp-ad-overlay-container');
+      const hidden = getComputedStyle(o).display === 'none';
+      mock.endAd();
+      return hidden;
+    });
+    assert.equal(r, true);
+  });
+
+  await t.test('本編と一体の長い動画は飛ばさず、早送りもしない', async () => {
+    const r = await runAd(page, { longStream: true }, 800);
+    assert.equal(r.adEnded, false);
+    assert.ok(r.currentTime < 5, '本編の位置まで飛ばない');
+    assert.equal(r.rate, 1.5);
+    await page.evaluate(() => mock.endAd());
+  });
+
+  await t.test('広告のあとも字幕はオフのまま', async () => {
+    assert.deepEqual(await watch(page, 500), OFF);
+  });
+  await page.close();
+});
+
 test('スクリプトの設定と構成', () => {
   assert.match(SCRIPT, /@run-at\s+document-start/, '読み込みの早い段階で動く');
   assert.doesNotMatch(SCRIPT, /\b(fetch|XMLHttpRequest|WebSocket|sendBeacon|GM_xmlhttpRequest|EventSource)\b/, '通信処理がない');
   assert.doesNotMatch(SCRIPT, /@(updateURL|downloadURL)/, '書き換え可能な場所から自動更新しない');
   const outsideConfig = SCRIPT.replace(/const CONFIG = \{[\s\S]*?\n  \};/, '');
-  assert.doesNotMatch(outsideConfig, /ytp-|caption-window|captions-text/, 'YouTube の部品名は CONFIG の1か所だけ');
+  assert.doesNotMatch(outsideConfig, /ytp-|caption-window|captions-text|ad-showing|html5-video-player/, 'YouTube の部品名は CONFIG の1か所だけ');
 });

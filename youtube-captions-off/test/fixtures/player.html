@@ -2,7 +2,7 @@
 <html>
 <head><meta charset="utf-8"><title>mock player</title></head>
 <body>
-<div id="movie_player"></div>
+<div id="movie_player" class="html5-video-player"></div>
 <script>
 // YouTube の字幕モジュール（iOS Safari の HLS 再生時）の動きを再現した模擬プレイヤー。
 // 実コードの挙動：
@@ -77,6 +77,43 @@ window.mock = {
     // プレイヤーは字幕オンのつもりで DOM の字幕も描く
     this.playerTrack = videoId + '.ja';
     this.renderDomCaption();
+  },
+
+  // 動画広告：プレイヤーに ad-showing を付け、広告動画を流す。広告が最後まで再生されたら本編に戻る
+  adEnded: false,
+  skipClicks: 0,
+  playAd({ longStream = false, skipButton = false, noSeek = false } = {}) {
+    const player = document.getElementById('movie_player');
+    const v = this.video;
+    this.adEnded = false;
+    player.classList.add('ad-showing');
+    const ui = document.createElement('div');
+    ui.className = 'ytp-ad-module';
+    ui.innerHTML = '<div class="ytp-ad-overlay-container">バナー広告</div>';
+    if (skipButton) {
+      const b = document.createElement('button');
+      b.className = 'ytp-skip-ad-button';
+      b.addEventListener('click', () => { this.skipClicks++; this.endAd(); });
+      ui.appendChild(b);
+    }
+    player.appendChild(ui);
+    if (longStream) {
+      // 本編と一体で配信される長い動画を再現
+      Object.defineProperty(v, 'duration', { configurable: true, get: () => 3600 });
+    }
+    v.onended = () => this.endAd();
+    // 本編と一体の配信は動画を差し替えない
+    if (!longStream) v.src = 'clip.webm?ad=1' + (noSeek ? '&noseek=1' : '');
+    v.play().catch(() => {});
+  },
+  endAd() {
+    const player = document.getElementById('movie_player');
+    if (!player.classList.contains('ad-showing')) return;
+    player.classList.remove('ad-showing');
+    player.querySelectorAll('.ytp-ad-module').forEach((e) => e.remove());
+    delete this.video.duration;
+    this.video.onended = null;
+    this.adEnded = true;
   },
 
   renderDomCaption() {

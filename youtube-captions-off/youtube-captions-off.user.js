@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Captions Off
-// @description  YouTube の字幕を常にオフにする。全画面・次の動画への遷移でもオフを維持する。
-// @version      1.2.0
+// @description  YouTube の字幕を常にオフにし、動画広告を飛ばす。全画面・次の動画への遷移でも効く。
+// @version      1.3.0
 // @match        *://m.youtube.com/*
 // @match        *://www.youtube.com/*
 // @run-at       document-start
@@ -35,6 +35,24 @@
       'webkitbeginfullscreen', // iOS の全画面開始
       'webkitpresentationmodechanged',
     ],
+    // 動画広告を飛ばす
+    ads: {
+      playerSelector: '.html5-video-player', // プレイヤー本体
+      adShowingClass: 'ad-showing',          // 広告の再生中にプレイヤーに付く印
+      skipButtonSelectors: [                 // 「スキップ」ボタン
+        '.ytp-skip-ad-button',
+        '.ytp-ad-skip-button',
+        '.ytp-ad-skip-button-modern',
+      ],
+      hideSelectors: [                       // 動画の上に重なるバナー広告
+        '.ytp-ad-overlay-container',
+      ],
+      // 広告の長さがこの秒数以下なら最後まで飛ばす。本編と一体の長い動画は誤って飛ばさないよう、早送りもしない
+      maxSeekSeconds: 180,
+      playbackRate: 16,
+      // 広告かどうかを確かめ直すきっかけにする video 要素のイベント
+      events: ['loadstart', 'loadedmetadata', 'durationchange', 'playing', 'timeupdate', 'ratechange'],
+    },
   };
   // ============================================================
 
@@ -42,7 +60,9 @@
   const css =
     CONFIG.captionSelectors.join(',\n') +
     ' { display: none !important; visibility: hidden !important; }\n' +
-    'video::cue { color: transparent !important; background: transparent !important; text-shadow: none !important; }';
+    'video::cue { color: transparent !important; background: transparent !important; text-shadow: none !important; }\n' +
+    CONFIG.ads.hideSelectors.join(',\n') +
+    ' { display: none !important; }';
 
   function injectStyle() {
     const root = document.head || document.documentElement;
@@ -141,6 +161,69 @@
           watchVideo(e.target);
           // プレイヤーが後から字幕オンを再適用しても、オフに揃え直す
           notifyPlayer(e.target);
+        }
+      },
+      true
+    );
+  }
+
+  // --- 動画広告を飛ばす ---
+  // 本編の再生速度を覚えておき、広告後に戻す。広告の動画に切り替わると速度は1倍に戻されるため、本編中に覚える
+  const contentRate = new WeakMap();
+  const inAdVideos = new WeakSet();
+
+  function handleAd(video) {
+    const ads = CONFIG.ads;
+    const player = video.closest(ads.playerSelector);
+    const inAd = !!player && player.classList.contains(ads.adShowingClass);
+
+    if (!inAd) {
+      if (inAdVideos.has(video)) {
+        inAdVideos.delete(video);
+        // こちらが上げた速度のままなら戻す。YouTube が自分で設定し直していれば触らない
+        if (video.playbackRate === ads.playbackRate) video.playbackRate = contentRate.get(video) || 1;
+      } else if (video.playbackRate !== ads.playbackRate) {
+        contentRate.set(video, video.playbackRate);
+      }
+      return;
+    }
+
+    inAdVideos.add(video);
+
+    for (const sel of ads.skipButtonSelectors) {
+      const btn = player.querySelector(sel);
+      if (btn) btn.click();
+    }
+
+    const d = video.duration;
+    if (Number.isFinite(d) && d > 0 && d <= ads.maxSeekSeconds) {
+      if (video.playbackRate !== ads.playbackRate) video.playbackRate = ads.playbackRate;
+      // 飛ばせる範囲まで読み込めているときだけ最後へ飛ぶ。飛ばせないのに飛ぼうとすると再生が止まり続ける
+      const s = video.seekable;
+      const canSeek = s.length > 0 && s.end(s.length - 1) >= d - 0.1;
+      if (canSeek && !video.seeking && video.currentTime < d - 0.1) video.currentTime = d - 0.1;
+    }
+  }
+
+  // 広告の始まりと終わりをすぐ拾うため、プレイヤーの class の変化を見張る
+  const watchedPlayers = new WeakSet();
+  function watchPlayer(video) {
+    const player = video.closest(CONFIG.ads.playerSelector);
+    if (!player || watchedPlayers.has(player)) return;
+    watchedPlayers.add(player);
+    new MutationObserver(() => {
+      const v = player.querySelector('video');
+      if (v) handleAd(v);
+    }).observe(player, { attributes: true, attributeFilter: ['class'] });
+  }
+
+  for (const type of CONFIG.ads.events) {
+    document.addEventListener(
+      type,
+      (e) => {
+        if (e.target && e.target.tagName === 'VIDEO') {
+          watchPlayer(e.target);
+          handleAd(e.target);
         }
       },
       true
