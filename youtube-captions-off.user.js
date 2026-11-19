@@ -88,9 +88,34 @@
     }
   }
 
+  // プレイヤーは textTracks の change を見て字幕の状態を合わせる。
+  // こちらでオフにした後に change を通知し、プレイヤー側も字幕オフの状態にする
+  const pendingNotify = new WeakSet();
+  function notifyPlayer(video) {
+    if (pendingNotify.has(video)) return;
+    pendingNotify.add(video);
+    setTimeout(() => {
+      pendingNotify.delete(video);
+      disableTracks(video);
+      if (video.textTracks) video.textTracks.dispatchEvent(new Event('change'));
+    }, 0);
+  }
+
+  // default 付きの字幕はブラウザが自動でオンにし、字幕ファイルの読み込みも始まる。追加された時点で外す
+  function stripDefault(track) {
+    if (track.hasAttribute('default')) track.removeAttribute('default');
+    if (track.track && isTarget(track.track) && track.track.mode !== 'disabled') track.track.mode = 'disabled';
+    const video = track.parentElement;
+    if (video && video.tagName === 'VIDEO') notifyPlayer(video);
+  }
+
   function scan(root) {
     if (root.tagName === 'VIDEO') watchVideo(root);
-    if (root.querySelectorAll) root.querySelectorAll('video').forEach(watchVideo);
+    if (root.tagName === 'TRACK') stripDefault(root);
+    if (root.querySelectorAll) {
+      root.querySelectorAll('video').forEach(watchVideo);
+      root.querySelectorAll('track').forEach(stripDefault);
+    }
   }
 
   // SPA 遷移で video が差し替わっても拾えるよう、DOM の追加を監視する
