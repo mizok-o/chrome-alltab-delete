@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>mock player</title></head>
+<body>
+<div id="movie_player"></div>
+<script>
+// YouTube の字幕モジュール（iOS Safari の HLS 再生時）の動きを再現した模擬プレイヤー。
+// 実コードの挙動：
+//  - 字幕ごとに <track kind="subtitles" id=... src=...vtt> を video に追加し、選択中のものに default を付ける
+//  - video.textTracks の change を監視し、showing のトラックがあればそれをプレイヤーの字幕に、なければ字幕オフにする
+//  - プレイヤーの字幕がオンなら、DOM の字幕レイヤーに文字を描く
+window.mock = {
+  playerTrack: null,   // プレイヤー側の字幕状態。null = オフ
+  changeEvents: 0,
+  log: [],
+  video: null,
+
+  attach(video) {
+    if (this.video === video) return;
+    this.video = video;
+    video.textTracks.addEventListener('change', () => {
+      this.changeEvents++;
+      let showing = null;
+      for (const t of video.textTracks) if (t.mode === 'showing') showing = t.id;
+      this.playerTrack = showing;
+      this.renderDomCaption();
+    });
+  },
+
+  createVideo() {
+    const v = document.createElement('video');
+    v.className = 'html5-main-video';
+    v.muted = true;
+    v.playsInline = true;
+    document.getElementById('movie_player').appendChild(v);
+    this.attach(v);
+    return v;
+  },
+
+  replaceVideo() {
+    if (this.video) this.video.remove();
+    this.video = null;
+    return this.createVideo();
+  },
+
+  // SPA 遷移：同じ video 要素で次の動画を読み込む
+  loadVideo(videoId) {
+    const v = this.video;
+    v.querySelectorAll('track').forEach((t) => t.remove());
+    v.src = 'clip.webm?v=' + videoId;
+    for (const lang of ['en', 'ja']) {
+      const tr = document.createElement('track');
+      tr.setAttribute('kind', 'subtitles');
+      tr.setAttribute('label', lang);
+      tr.setAttribute('srclang', lang);
+      tr.setAttribute('id', videoId + '.' + lang);
+      tr.setAttribute('src', 'subs.vtt?v=' + videoId + '&lang=' + lang);
+      if (lang === 'ja') tr.setAttribute('default', '1'); // 字幕が勝手にオンになる状態
+      v.appendChild(tr);
+    }
+    // プレイヤーは字幕オンのつもりで DOM の字幕も描く
+    this.playerTrack = videoId + '.ja';
+    this.renderDomCaption();
+  },
+
+  renderDomCaption() {
+    document.querySelectorAll('.ytp-caption-window-container').forEach((e) => e.remove());
+    if (!this.playerTrack) return;
+    const c = document.createElement('div');
+    c.className = 'ytp-caption-window-container';
+    c.innerHTML =
+      '<div class="caption-window ytp-caption-window-bottom"><span class="captions-text">' +
+      '<span class="ytp-caption-segment">字幕テキスト</span></span></div>';
+    document.getElementById('movie_player').appendChild(c);
+  },
+};
+</script>
+</body>
+</html>
