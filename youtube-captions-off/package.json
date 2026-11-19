@@ -1,0 +1,10 @@
+{
+  "name": "youtube-captions-off",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.50.0"
+  }
+}

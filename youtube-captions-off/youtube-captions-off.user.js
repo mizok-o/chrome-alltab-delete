@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         YouTube Captions Off
 // @description  YouTube の字幕を常にオフにする。全画面・次の動画への遷移でもオフを維持する。
-// @version      1.0.0
+// @version      1.1.0
 // @match        *://m.youtube.com/*
 // @match        *://www.youtube.com/*
 // @run-at       document-start
 // @inject-into  content
 // @noframes
+// @updateURL    https://raw.githubusercontent.com/mizok-o/chrome-alltab-delete/main/youtube-captions-off/youtube-captions-off.user.js
+// @downloadURL  https://raw.githubusercontent.com/mizok-o/chrome-alltab-delete/main/youtube-captions-off/youtube-captions-off.user.js
 // ==/UserScript==
 
 (function () {
