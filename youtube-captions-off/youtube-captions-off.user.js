@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         YouTube Captions Off
-// @description  YouTube の字幕を常にオフにし、動画広告を飛ばす。全画面・次の動画への遷移でも効く。
-// @version      1.3.0
+// @description  YouTube の字幕を常にオフにし、動画広告を止める。全画面・次の動画への遷移でも効く。
+// @version      2.0.0
 // @match        *://m.youtube.com/*
 // @match        *://www.youtube.com/*
 // @run-at       document-start
-// @inject-into  content
+// @inject-into  auto
 // @noframes
 // ==/UserScript==
 
@@ -35,8 +35,12 @@
       'webkitbeginfullscreen', // iOS の全画面開始
       'webkitpresentationmodechanged',
     ],
-    // 動画広告を飛ばす
+    // 動画広告を止める
     ads: {
+      // その1（主）：YouTube が受け取る動画情報から取り除く広告データ。これがないと広告が予定されない
+      pruneKeys: ['adPlacements', 'adSlots', 'playerAds', 'adBreakHeartbeatParams'],
+      // ページの読み込み時に埋め込まれる動画情報の変数名
+      initialVars: ['ytInitialPlayerResponse'],
       playerSelector: '.html5-video-player', // プレイヤー本体
       adShowingClass: 'ad-showing',          // 広告の再生中にプレイヤーに付く印
       skipButtonSelectors: [                 // 「スキップ」ボタン
@@ -44,14 +48,19 @@
         '.ytp-ad-skip-button',
         '.ytp-ad-skip-button-modern',
       ],
-      hideSelectors: [                       // 動画の上に重なるバナー広告
+      hideSelectors: [                       // 動画に重なるバナー広告と、ページ内の広告枠
         '.ytp-ad-overlay-container',
+        'ad-slot-renderer',
+        'ytm-promoted-sparkles-web-renderer',
+        'ytm-promoted-video-renderer',
+        'ytm-companion-ad-renderer',
+        'ytm-rich-item-renderer:has(> ad-slot-renderer)',
       ],
-      // 広告の長さがこの秒数以下なら最後まで飛ばす。本編と一体の長い動画は誤って飛ばさないよう、早送りもしない
+      // その2：広告の長さがこの秒数以下なら最後まで飛ぶ。本編と一体で配信される長い動画では飛ばず、早送りだけにする
       maxSeekSeconds: 180,
       playbackRate: 16,
       // 広告かどうかを確かめ直すきっかけにする video 要素のイベント
-      events: ['loadstart', 'loadedmetadata', 'durationchange', 'playing', 'timeupdate', 'ratechange'],
+      events: ['loadstart', 'loadedmetadata', 'durationchange', 'playing', 'timeupdate', 'ratechange', 'volumechange'],
     },
   };
   // ============================================================
@@ -167,37 +176,106 @@
     );
   }
 
-  // --- 動画広告を飛ばす ---
+  // --- 広告その1（主）：動画情報から広告データを取り除き、広告を予定させない ---
+  // ページ側で動いたときだけ効く。Userscripts がページ側に入れなかった場合は、その2だけで止める
+  function isServerStitched(res) {
+    // 広告と本編が一体で配信される動画。広告データを消すと広告が本編扱いになり、その2でも検知できなくなるので残す
+    return !!(res && res.daiConfig && res.daiConfig.enableServerStitchedDai);
+  }
+
+  function pruneAds(obj) {
+    if (!obj || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) {
+      for (const item of obj) pruneAds(item);
+      return obj;
+    }
+    if (!isServerStitched(obj)) {
+      for (const key of CONFIG.ads.pruneKeys) if (key in obj) delete obj[key];
+    }
+    if (obj.playerResponse && typeof obj.playerResponse === 'object') pruneAds(obj.playerResponse);
+    return obj;
+  }
+
+  function safePrune(obj) {
+    try {
+      return pruneAds(obj);
+    } catch (e) {
+      return obj;
+    }
+  }
+
+  try {
+    const originalParse = JSON.parse;
+    JSON.parse = function (...args) {
+      return safePrune(originalParse.apply(this, args));
+    };
+  } catch (e) {}
+
+  try {
+    const originalJson = Response.prototype.json;
+    Response.prototype.json = function (...args) {
+      return originalJson.apply(this, args).then(safePrune);
+    };
+  } catch (e) {}
+
+  for (const name of CONFIG.ads.initialVars) {
+    try {
+      let value = safePrune(window[name]);
+      Object.defineProperty(window, name, {
+        configurable: true,
+        get: () => value,
+        set: (v) => {
+          value = safePrune(v);
+        },
+      });
+    } catch (e) {}
+  }
+
+  // --- 広告その2：それでも広告が流れたら、音を消して飛ばす ---
   // 本編の再生速度を覚えておき、広告後に戻す。広告の動画に切り替わると速度は1倍に戻されるため、本編中に覚える
   const contentRate = new WeakMap();
-  const inAdVideos = new WeakSet();
+  const adSession = new WeakMap(); // 広告に入る前の音の状態
+
+  function setRate(video, rate) {
+    try {
+      if (video.playbackRate !== rate) video.playbackRate = rate;
+    } catch (e) {}
+  }
 
   function handleAd(video) {
     const ads = CONFIG.ads;
     const player = video.closest(ads.playerSelector);
     const inAd = !!player && player.classList.contains(ads.adShowingClass);
+    const session = adSession.get(video);
 
     if (!inAd) {
-      if (inAdVideos.has(video)) {
-        inAdVideos.delete(video);
+      if (session) {
+        adSession.delete(video);
         // こちらが上げた速度のままなら戻す。YouTube が自分で設定し直していれば触らない
-        if (video.playbackRate === ads.playbackRate) video.playbackRate = contentRate.get(video) || 1;
+        if (video.playbackRate === ads.playbackRate) setRate(video, contentRate.get(video) || 1);
+        if (!session.muted && video.muted) {
+          const wasPlaying = !video.paused;
+          video.muted = false;
+          // 音を戻したときに止まる端末があるため、再生中だったなら再生し直す
+          if (wasPlaying && video.paused) video.play().catch(() => {});
+        }
       } else if (video.playbackRate !== ads.playbackRate) {
         contentRate.set(video, video.playbackRate);
       }
       return;
     }
 
-    inAdVideos.add(video);
+    if (!session) adSession.set(video, { muted: video.muted });
+    if (!video.muted) video.muted = true;
 
     for (const sel of ads.skipButtonSelectors) {
       const btn = player.querySelector(sel);
       if (btn) btn.click();
     }
 
+    setRate(video, ads.playbackRate);
     const d = video.duration;
     if (Number.isFinite(d) && d > 0 && d <= ads.maxSeekSeconds) {
-      if (video.playbackRate !== ads.playbackRate) video.playbackRate = ads.playbackRate;
       // 飛ばせる範囲まで読み込めているときだけ最後へ飛ぶ。飛ばせないのに飛ぼうとすると再生が止まり続ける
       const s = video.seekable;
       const canSeek = s.length > 0 && s.end(s.length - 1) >= d - 0.1;
@@ -229,6 +307,11 @@
       true
     );
   }
+
+  // どちら側で動いているかの目印。page なら広告その1も効いている。Web インスペクタで html 要素を見れば分かる
+  document.addEventListener('DOMContentLoaded', () => {
+    document.documentElement.setAttribute('data-yt-captions-off', typeof window.ytcfg !== 'undefined' ? 'page' : 'content');
+  });
 
   scan(document);
 })();

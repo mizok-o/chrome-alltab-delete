@@ -1,6 +1,11 @@
 <!doctype html>
 <html>
-<head><meta charset="utf-8"><title>mock player</title></head>
+<head><meta charset="utf-8"><title>mock player</title>
+<script>
+  // YouTube はページの読み込み時に、広告データ入りの動画情報をこの変数に埋め込む
+  var ytInitialPlayerResponse = { videoDetails: { videoId: 'v1' }, adPlacements: [{}], adSlots: [{}], playerAds: [{}] };
+</script>
+</head>
 <body>
 <div id="movie_player" class="html5-video-player"></div>
 <script>
@@ -42,7 +47,7 @@ window.mock = {
   createVideo() {
     const v = document.createElement('video');
     v.className = 'html5-main-video';
-    v.muted = true;
+    v.muted = false; // 利用者は音ありで見ている
     v.playsInline = true;
     document.getElementById('movie_player').appendChild(v);
     this.attach(v);

@@ -24,6 +24,12 @@ async function open(withScript) {
   await page.route('**/*', (route) => {
     const url = new URL(route.request().url());
     if (url.origin !== ORIGIN) { net.external++; return route.abort(); }
+    if (url.pathname === '/youtubei/v1/player') {
+      // 次の動画へ移るときに YouTube が取りに行く動画情報
+      const body = { videoDetails: { videoId: 'v2' }, adPlacements: [{}], adSlots: [{}], playerAds: [{}] };
+      if (url.searchParams.has('ssai')) body.daiConfig = { enableDai: true, enableServerStitchedDai: true };
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
+    }
     if (url.pathname.endsWith('.vtt')) { net.vtt++; return route.fulfill({ contentType: 'text/vtt', body: VTT }); }
     const file = path.join(FIX, path.basename(url.pathname));
     const range = route.request().headers()['range'];
@@ -149,11 +155,47 @@ function runAd(page, opts, ms = 1500) {
       adEnded: mock.adEnded,
       skipClicks: mock.skipClicks,
       rate: mock.video.playbackRate,
+      muted: mock.video.muted,
       currentTime: mock.video.currentTime,
       overlayHidden: !overlay || getComputedStyle(overlay).display === 'none',
     };
   }, { opts, ms });
 }
+
+test('広告データを取り除き、広告を予定させない', async (t) => {
+  const read = (page) => page.evaluate(async () => {
+    const keys = (o) => ['adPlacements', 'adSlots', 'playerAds'].filter((k) => o && k in o);
+    const fetched = await (await fetch('/youtubei/v1/player')).json();
+    const parsed = JSON.parse(await (await fetch('/youtubei/v1/player')).text());
+    const wrapped = JSON.parse(JSON.stringify([{ playerResponse: { adPlacements: [{}], videoDetails: {} } }]));
+    const ssai = await (await fetch('/youtubei/v1/player?ssai=1')).json();
+    return {
+      initial: keys(window.ytInitialPlayerResponse),
+      fetched: keys(fetched),
+      parsed: keys(parsed),
+      wrapped: keys(wrapped[0].playerResponse),
+      ssai: keys(ssai),
+      videoKept: !!(fetched.videoDetails && window.ytInitialPlayerResponse.videoDetails),
+    };
+  });
+
+  await t.test('対照：スクリプトなしでは広告データがある', async () => {
+    const { page } = await open(false);
+    const r = await read(page);
+    assert.equal(r.initial.length, 3);
+    assert.equal(r.fetched.length, 3);
+    await page.close();
+  });
+
+  await t.test('読み込み時・次の動画・入れ子の動画情報から広告データが消え、動画の情報は残る', async () => {
+    const { page } = await open(true);
+    const r = await read(page);
+    assert.deepEqual([r.initial, r.fetched, r.parsed, r.wrapped], [[], [], [], []]);
+    assert.equal(r.videoKept, true);
+    assert.equal(r.ssai.length, 3, '本編と一体で配信される動画では消さない');
+    await page.close();
+  });
+});
 
 test('動画広告', async (t) => {
   await t.test('対照：スクリプトなしでは広告が最後まで流れる', async () => {
@@ -168,10 +210,23 @@ test('動画広告', async (t) => {
   const { page } = await open(true);
   await page.evaluate(() => { mock.createVideo(); mock.loadVideo('v1'); });
 
-  await t.test('広告を最後まで飛ばし、再生速度を元に戻す', async () => {
+  await t.test('広告を最後まで飛ばし、再生速度と音を元に戻す', async () => {
     const r = await runAd(page, {});
     assert.equal(r.adEnded, true, '広告が終わる');
     assert.equal(r.rate, 1.5, '利用者の再生速度に戻る');
+    assert.equal(r.muted, false, '音が戻る');
+  });
+
+  await t.test('広告の再生中は音を消す', async () => {
+    const muted = await page.evaluate(async () => {
+      mock.playAd({ longStream: true });
+      await new Promise((r) => setTimeout(r, 100));
+      const m = mock.video.muted;
+      mock.endAd();
+      await new Promise((r) => setTimeout(r, 50));
+      return [m, mock.video.muted];
+    });
+    assert.deepEqual(muted, [true, false]);
   });
 
   await t.test('飛ばせない広告は早送りで終わらせ、再生が止まり続けない', async () => {
@@ -197,12 +252,35 @@ test('動画広告', async (t) => {
     assert.equal(r, true);
   });
 
-  await t.test('本編と一体の長い動画は飛ばさず、早送りもしない', async () => {
-    const r = await runAd(page, { longStream: true }, 800);
-    assert.equal(r.adEnded, false);
-    assert.ok(r.currentTime < 5, '本編の位置まで飛ばない');
-    assert.equal(r.rate, 1.5);
-    await page.evaluate(() => mock.endAd());
+  await t.test('本編と一体の長い動画は飛ばさず、広告の間だけ早送りする', async () => {
+    const r = await page.evaluate(async () => {
+      const v = mock.video;
+      v.playbackRate = 1.5;
+      await new Promise((r) => setTimeout(r, 300));
+      const before = v.currentTime;
+      mock.playAd({ longStream: true });
+      await new Promise((r) => setTimeout(r, 100));
+      const during = { rate: v.playbackRate, jumped: v.currentTime - before > 3 };
+      mock.endAd();
+      await new Promise((r) => setTimeout(r, 50));
+      return { during, after: { rate: v.playbackRate, muted: v.muted } };
+    });
+    assert.deepEqual(r, { during: { rate: 16, jumped: false }, after: { rate: 1.5, muted: false } });
+  });
+
+  await t.test('広告でない本編は飛ばさず、速度も音も変えない', async () => {
+    const r = await page.evaluate(async () => {
+      const v = mock.video;
+      v.currentTime = 0;
+      v.playbackRate = 1;
+      await v.play().catch(() => {});
+      const t0 = performance.now();
+      await new Promise((r) => setTimeout(r, 1000));
+      return { advanced: v.currentTime, wall: (performance.now() - t0) / 1000, rate: v.playbackRate, muted: v.muted };
+    });
+    assert.equal(r.rate, 1);
+    assert.equal(r.muted, false);
+    assert.ok(r.advanced < r.wall + 0.5, '再生位置が実時間より先に進まない');
   });
 
   await t.test('広告のあとも字幕はオフのまま', async () => {
@@ -216,5 +294,5 @@ test('スクリプトの設定と構成', () => {
   assert.doesNotMatch(SCRIPT, /\b(fetch|XMLHttpRequest|WebSocket|sendBeacon|GM_xmlhttpRequest|EventSource)\b/, '通信処理がない');
   assert.doesNotMatch(SCRIPT, /@(updateURL|downloadURL)/, '書き換え可能な場所から自動更新しない');
   const outsideConfig = SCRIPT.replace(/const CONFIG = \{[\s\S]*?\n  \};/, '');
-  assert.doesNotMatch(outsideConfig, /ytp-|caption-window|captions-text|ad-showing|html5-video-player/, 'YouTube の部品名は CONFIG の1か所だけ');
+  assert.doesNotMatch(outsideConfig, /ytp-|caption-window|captions-text|ad-showing|html5-video-player|adPlacements|ytInitialPlayerResponse/, 'YouTube の部品名は CONFIG の1か所だけ');
 });
